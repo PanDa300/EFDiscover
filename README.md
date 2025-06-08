@@ -21,7 +21,7 @@ The following table summarizes the datasets used in this repository, including t
 | Rice     | 3,808 × 6    | Data recording of morphological characteristics of rice.                                                                |
 
 
-
+<!--
 # Running Uniclean’s Cleaning Performance Test
 
 To evaluate Uniclean’s cleaning performance, run the `run.sh` script. This script automates the cleaning process across all datasets and saves performance logs in the `Uniclean_logs/` directory.
@@ -99,3 +99,4 @@ The `run.sh` script iterates over each dataset in the `datasets/original_dataset
 - `evaluate_result.py`: A script that computes performance metrics for data cleaning, such as accuracy, recall, F1 score, and error reduction rate, allowing comprehensive evaluation of data cleaning effectiveness.
 - `get_holoclean_table.py` A script that transforms datasets into the Holoclean-compatible input CSV format. It transposes data and ensures compliance with Holoclean's required schema for further data cleaning tasks.
 - `get_error_num.py` A script that compares dirty data with clean data to compute the number of erroneous cells and entries. It provides a detailed analysis of the extent of errors, facilitating error quantification and benchmarking.
+-->
