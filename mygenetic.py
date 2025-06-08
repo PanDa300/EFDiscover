@@ -12,9 +12,8 @@ OPERATORS = {
     '/': lambda x, y: x / y if y != 0 else 1,  # 防止除以零
     #'^2': lambda x: x*x ,  # 防止负数的幂次和溢出
     #'^3': lambda x: x*x*x ,  # 防止负数的幂次和溢出
-    #'cos': math.cos,
-    #'sin': math.sin,
-    #'x100': lambda x: x*10,
+    'cos': math.cos,
+    'sin': math.sin
 }
 
 
@@ -31,7 +30,7 @@ class Node:
             if isinstance(self.value, float):
                 return self.value
             elif isinstance(self.value, str) and self.value in OPERATORS:
-                if self.value in ['cos', 'sin','x100']:
+                if self.value in ['cos', 'sin']:
                     #print(self.value,type(self.value),isinstance(self.value, int),isinstance(self.value, np.int64),self.left,self.right,self.left.evaluate(x))
                     xx=self.left.evaluate(x)
                     vvalue = OPERATORS[self.value](xx)
@@ -55,12 +54,12 @@ class Node:
 
     def __str__(self):
         if isinstance(self.value, float):
-            return '%.2f'%(self.value)
+            return str(self.value)
         elif isinstance(self.value, int) or isinstance(self.value, np.int64):
             return f"x{self.value}"
         elif self.value in ['cos', 'sin']:
             return f"{self.value}({self.left})"
-        elif self.value in ['^2','^3','x100']:
+        elif self.value in ['^2','^3']:
             return f"({self.left}){self.value}"
         else:
             return f"({self.left} {self.value} {self.right})"
@@ -75,7 +74,7 @@ def generate_random_tree(depth, num_features):
         return Node(random.choice(list(num_features) + [random.uniform(-1, 1)]))
     else:
         operator = random.choice(list(OPERATORS.keys()))
-        if operator in ['cos', 'sin','^2','^3','x100']:
+        if operator in ['cos', 'sin','^2','^3']:
             return Node(operator, left=generate_random_tree(depth - 1, num_features))
         else:
             return Node(operator, left=generate_random_tree(depth - 1, num_features),
