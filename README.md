@@ -23,10 +23,12 @@ X --(f, ε)--> Y ,   f(X) = Y ,   拟合误差 ≤ ε
    ⇒ 该属性集合已是 EFD；若 LHS 及其所有扩展都超过 `ε` ⇒ 整棵子树是 nonEFD
    （nonEFD 对属性扩展单调，因此可以整棵剪掉）。
 3. **子树剪枝**：判定一个节点后，把"全 EFD / 全 nonEFD"的整棵子树剪掉，不再逐个回归。
-4. **符号回归**：每个待判定的属性集合跑一次遗传编程符号回归（`mygenetic.py`），
-   得到最优表达式与 MSE，与 `φ` 比较决定是 EFD 还是 nonEFD。
+4. **符号回归**：每个待判定的属性集合跑一次符号回归，得到最优表达式与 MSE，
+   与 `φ` 比较决定是 EFD 还是 nonEFD。两个后端可选：
+   `--backend gp` 用遗传编程（`mygenetic.py`），`--backend rnn` 用 LSTM 逐符号生成
+   表达式（`SymbolicRNN.py`，需 PyTorch）。
 5. **两个可选优化**：
-   * **增量发现**：把上一节点的种群沿 EBTree 复用，省掉随机重启；
+   * **增量发现**：把上一节点的种群沿 EBTree 复用，省掉随机重启（RNN 后端是复用已训练的 LSTM）；
    * **损失变化率早停**：相邻两代最优适应度变化小于 `loss_threshold/10` 就认为收敛退出。
 
 ## 目录结构
@@ -38,9 +40,9 @@ X --(f, ε)--> Y ,   f(X) = Y ,   拟合误差 ≤ ε
 | `SymRegression.py` | 符号回归封装（数据读取、回归调用、结果缓存），完整版 |
 | `SymRegression1.py` | 变体 nonSymPop：关闭增量发现 |
 | `SymRegression2.py` | 变体 nonSymLoss：关闭损失变化率早停 |
-| `mygenetic.py` | 遗传编程符号回归（表达式树、选择、交叉、变异、早停） |
+| `mygenetic.py` | 遗传编程符号回归（表达式树、选择、交叉、变异、早停），`--backend gp` 使用 |
 | `glass.data` | 示例数据（UCI Glass，214 行，首列为样本编号，无表头） |
-| `SymbolicRNN.py` | 用 RNN 构造表达式的另一条路径（需 PyTorch，未接入主流程） |
+| `SymbolicRNN.py` | RNN 符号回归（LSTM 逐符号生成表达式 + 精英交叉熵训练），`--backend rnn` 使用 |
 | `convert.py` / `corrsplit.py` / `draw.py` | 辅助脚本：表达式串转符号序列、属性相关性分组、作图 |
 
 ## 环境
@@ -49,7 +51,8 @@ X --(f, ε)--> Y ,   f(X) = Y ,   拟合误差 ≤ ε
 pip install -r requirements.txt
 ```
 
-Python ≥ 3.8，主流程只依赖 `numpy` 与 `pandas`；`SymbolicRNN.py` 额外需要 PyTorch。
+Python ≥ 3.8，默认（`--backend gp`）只依赖 `numpy` 与 `pandas`；
+`--backend rnn` 额外需要 PyTorch。
 
 ## 数据
 
@@ -64,6 +67,7 @@ python main.py                                  # glass.data 前 60 行、随机
 python main.py --drop-id                        # 去掉样本编号列
 python main.py --rows 100 --cols -1 --drop-id   # 用全部 214 行、全部属性
 python main.py --variant all                    # 三个变体一起跑
+python main.py --backend rnn                    # 符号回归改用 LSTM 生成
 python main.py --phi 0.01 --top 10              # 收紧损失阈值
 ```
 
@@ -76,6 +80,7 @@ python main.py --phi 0.01 --top 10              # 收紧损失阈值
 | `--cols` | 8 | 随机取多少列属性，`-1` 为全部 |
 | `--phi` | 0.02 | EFD 损失阈值 `ε` |
 | `--variant` | `0` | `0`=完整流程，`1`=不做增量发现，`2`=不做损失变化率早停，`all`=三个都跑 |
+| `--backend` | `gp` | 符号回归后端：`gp`=遗传编程，`rnn`=LSTM 逐符号生成（需 PyTorch） |
 | `--drop-id` | 关闭 | 无表头数据去掉第一列 |
 | `--seed` | 0 | 随机种子（列抽样与遗传算法都受它控制） |
 | `--max-depth` | 3 | 表达式树最大深度 |

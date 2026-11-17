@@ -1,229 +1,328 @@
+# -*- coding: utf-8 -*-
+"""RNN 驱动的符号回归（``--backend rnn``）
+
+与 ``mygenetic``（遗传编程）互为替代：同样输入 ``Y`` 与 LHS 列，输出最优表达式与 MSE，
+但搜索方式换成"LSTM 逐个符号生成表达式 + 精英序列的交叉熵训练"。
+
+表达式的表示与生成
+------------------
+表达式按**前缀序列**表示，例如 ``c = a + b`` 为 ``['+', 'x0', 'x1']``。生成时用
+一个"待填槽位"栈保证语法永远合法：
+
+* 选到二元运算符 → 弹掉当前槽位、压入两个子槽位；
+* 选到一元运算符（``sin``/``cos``）→ 弹掉当前槽位、压入一个子槽位；
+* 选到叶子（属性或常数）→ 弹掉当前槽位。
+
+再加上两条约束：槽位深度达到 ``max_depth`` 时只能选叶子；本次生成的 token 数不能
+超过 ``max_len``（否则表达式无限长）。这样 LSTM 只需在每一步对"合法 token 集合"
+输出概率分布，不会产生非法表达式。
+
+训练方式
+--------
+每一轮采样若干个表达式、算 MSE，取误差最小的若干个作为"精英序列"，对它们做
+教师强制的交叉熵训练（相当于 cross-entropy method，CEM）。精英里始终保留历史最优，
+因此不会退化。这比 REINFORCE 稳定，也不需要额外的基线函数。
+
+与遗传编程的对应关系
+--------------------
+``population_size`` → 每轮采样数；``generations`` → 训练轮数；
+``reuse_pop``（增量发现）→ 是否跨节点复用已训练的 LSTM（词表不同的 LHS 会重建模型）；
+``early_stop``（损失变化率早停）→ 连续若干轮无改进就停。
+"""
+import math
+import random
+
 import numpy as np
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import pandas as pd
+
+try:                      # torch 是可选的：没有装也不影响 --backend gp
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+    HAS_TORCH = True
+except ImportError:       # pragma: no cover
+    HAS_TORCH = False
+
+BINARY = ("+", "-", "*", "/")
+UNARY = ("sin", "cos")
+
+BOS = 0                   # 序列起始符（词表下标 0）
 
 
-def mean_squared_error(y_true, y_pred, multioutput='uniform_average'):
-    """
-    支持多维输出的MSE
+# --------------------------------------------------------------- 表达式工具
+def _parse(tokens):
+    """前缀 token 序列 → 语法树（嵌套元组）"""
+    pos = [0]
 
-    参数:
-    y_true -- 真实值数组 (n_samples,) 或 (n_samples, n_outputs)
-    y_pred -- 预测值数组
-    multioutput -- 'uniform_average'：各维度平均
-                   'raw_values'：返回各维度MSE
-                    array-like：自定义各维度权重
+    def build():
+        tok = tokens[pos[0]]
+        pos[0] += 1
+        if isinstance(tok, tuple):          # ('const', 数值)
+            return ("const", tok[1])
+        if tok in UNARY:
+            return ("unary", tok, build())
+        if tok in BINARY:
+            return ("binary", tok, build(), build())
+        return ("var", int(tok[1:]))
 
-    返回:
-    mse -- 根据multioutput参数返回不同形式
-    """
-    y_true = np.array(y_true)
-    y_pred = np.array(y_pred)
+    return build()
 
-    if y_true.ndim == 1:
-        y_true = y_true.reshape(-1, 1)
-        y_pred = y_pred.reshape(-1, 1)
 
-    '''if y_true.shape != y_pred.shape:
-        raise ValueError(f"形状不一致: y_true {y_true.shape}, y_pred {y_pred.shape}")'''
-    output_errors = np.mean(np.square(y_true - y_pred), axis=0)
+def _evaluate(node, X):
+    """用 numpy 向量化求值某棵语法树"""
+    kind = node[0]
+    if kind == "const":
+        return node[1]
+    if kind == "var":
+        col = node[1]
+        return X[:, col] if col < X.shape[1] else 0.0
+    if kind == "unary":
+        v = _evaluate(node[2], X)
+        return np.sin(v) if node[1] == "sin" else np.cos(v)
 
-    if isinstance(multioutput, (list, np.ndarray)):
-        return np.dot(output_errors, multioutput)
-    elif multioutput == 'raw_values':
-        return output_errors
-    elif multioutput == 'uniform_average':
-        return np.mean(output_errors)
-    else:
-        raise ValueError("不支持的multioutput参数")
-class SafeOperations:
-    @staticmethod
-    def safe_div(a, b):
-        """双重保护除法"""
-        denominator = np.where(np.abs(b) < 1e-6, np.sign(b)*1e-6 + 1e-12, b)
-        return np.clip(a / denominator, -1e10, 1e10)  # 防止数值溢出
+    a = _evaluate(node[2], X)
+    b = _evaluate(node[3], X)
+    with np.errstate(all="ignore"):
+        if node[1] == "+":
+            return a + b
+        if node[1] == "-":
+            return a - b
+        if node[1] == "*":
+            return a * b
+        safe = np.where(np.abs(b) < 1e-9, 1.0, b)      # 除零保护
+        return a / safe
 
-    @staticmethod
-    def safe_log(x):
-        """双重保护对数"""
-        safe_x = np.clip(np.abs(x), 1e-12, 1e12)  # 限制输入范围
-        return np.log(safe_x + 1e-12)
 
-    @staticmethod
-    def safe_exp(x):
-        """安全指数函数"""
-        return np.exp(np.clip(x, -100, 100))  # 防止exp(1000)导致溢出
+def _to_string(node):
+    """语法树 → 可读表达式串"""
+    kind = node[0]
+    if kind == "const":
+        return f"{node[1]:.4g}"
+    if kind == "var":
+        return f"x{node[1]}"
+    if kind == "unary":
+        return f"{node[1]}({_to_string(node[2])})"
+    return f"({_to_string(node[2])} {node[1]} {_to_string(node[3])})"
 
-class SymbolicRegressorRNN(nn.Module):
-    def __init__(self, data, max_len=20, hidden_size=128):
+
+def _mse(tokens, X, y):
+    """表达式在数据上的均方误差；非法表达式返回 inf"""
+    try:
+        pred = _evaluate(_parse(tokens), X)
+        pred = np.broadcast_to(np.asarray(pred, dtype=float), y.shape)
+        if not np.all(np.isfinite(pred)):
+            return float("inf")
+        if np.abs(pred).max() > 1e12:
+            return float("inf")
+        return float(np.mean((y - pred) ** 2))
+    except Exception:
+        return float("inf")
+
+
+# ------------------------------------------------------------------- 模型
+class _Policy(nn.Module):
+    """LSTM 策略网络：输入已生成的 token，输出下一个 token 的分布"""
+
+    def __init__(self, vocab_size, hidden=48, emb=32):
         super().__init__()
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.data = data.values if isinstance(data, pd.DataFrame) else data
+        self.emb = nn.Embedding(vocab_size, emb)
+        self.lstm = nn.LSTM(emb, hidden, batch_first=True)
+        self.head = nn.Linear(hidden, vocab_size)
+
+    def forward(self, idx, lengths):
+        e = self.emb(idx)
+        packed = nn.utils.rnn.pack_padded_sequence(e, lengths, batch_first=True,
+                                                   enforce_sorted=False)
+        out, _ = self.lstm(packed)
+        out, _ = nn.utils.rnn.pad_packed_sequence(out, batch_first=True)
+        return self.head(out)
+
+
+class RNNRegressor:
+    """一次符号回归任务：在给定 LHS 上训练 LSTM 并生成最优表达式"""
+
+    def __init__(self, num_features, max_len=15, hidden=48, lr=0.02, seed=0):
+        if not HAS_TORCH:
+            raise RuntimeError("RNN 后端需要 PyTorch：pip install torch")
+        self.num_features = num_features
         self.max_len = max_len
-        self.hidden_size = hidden_size
-        self.base_vocab = ['+', '-', '*', '/', 'sin', 'cos', 'exp', 'log', '(', ')', 'c']
-        self.current_vocab = None
-        self.model = None
-        # 更新基础符号表
-        self.safe_ops = {
-            '/': SafeOperations.safe_div,
-            'log': SafeOperations.safe_log,
-            'exp': SafeOperations.safe_exp,
-            'sqrt': lambda x: np.sqrt(np.clip(x, 0, None)),
-            'abs': np.abs
-        }
+        self.hidden = hidden
+        self.lr = lr
+        self.seed = seed
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.vocab = [f"x{i}" for i in range(num_features)] + ["c"] + list(BINARY) + list(UNARY)
+        self.index = {tok: i + 1 for i, tok in enumerate(self.vocab)}   # 0 留给 BOS
+        torch.manual_seed(seed)
+        self.model = _Policy(len(self.vocab) + 1, hidden=hidden).to(self.device)
+        self.opt = torch.optim.Adam(self.model.parameters(), lr=lr)
 
-    def _build_vocab(self, num_features):
-        """根据特征数量生成动态符号表"""
-        return [f'x{i}' for i in range(num_features)] + self.base_vocab
+    # ------------------------------------------------------------ 生成
+    def _mask_for(self, depth, n_tokens, n_slots):
+        """当前状态下允许选择的 token 集合（bool 数组，长度 = 词表 + 1）"""
+        mask = np.zeros(len(self.vocab) + 1, dtype=bool)
+        left = self.max_len - n_tokens - 1          # 本步之后还剩多少 token 预算
+        leaf_ok = left >= n_slots - 1               # 选叶子：槽位数 -1
+        unary_ok = left >= n_slots                  # 选一元：槽位数不变
+        binary_ok = left >= n_slots + 1             # 选二元：槽位数 +1
+        if depth >= self.max_len:                   # 理论上不会发生，保险
+            leaf_ok, unary_ok, binary_ok = True, False, False
+        if leaf_ok:
+            for i in range(self.num_features + 1):  # 属性 + 常数 c
+                mask[i + 1] = True
+        if unary_ok:
+            for op in UNARY:
+                mask[self.index[op]] = True
+        if binary_ok:
+            for op in BINARY:
+                mask[self.index[op]] = True
+        if not mask.any():                          # 兜底
+            mask[1:self.num_features + 2] = True
+        return mask
 
-    def _init_model(self, vocab_size):
-        """初始化PyTorch模型"""
-        return nn.Sequential(
-            nn.Embedding(vocab_size, 64),
-            nn.LSTM(64, self.hidden_size, batch_first=True),
-            nn.LSTM(self.hidden_size, self.hidden_size, batch_first=True),
-            nn.Linear(self.hidden_size, vocab_size)
-        )
+    def sample_batch(self, n, max_depth, const_scale):
+        """并行采样 n 个合法表达式（每一步一次批量前向）"""
+        states = [{"tokens": [], "slots": [0], "seq": [BOS]} for _ in range(n)]
+        active = list(range(n))
 
-    def _generate_safe_leaf(self, num_features):
-        """生成带数值保护的叶子节点"""
-        if np.random.rand() < 0.3:
-            val = np.clip(np.random.uniform(-10, 10), -1e3, 1e3)  # 限制常数范围
-            return f"{val:.6f}"
-        else:
-            return f"x{np.random.randint(num_features)}"
+        while active:
+            seqs = [states[i]["seq"] for i in active]
+            lens = torch.tensor([len(s) for s in seqs], dtype=torch.long)   # pack 要求 CPU 张量
+            width = int(max(len(s) for s in seqs))
+            batch = torch.zeros((len(active), width), dtype=torch.long, device=self.device)
+            for r, seq in enumerate(seqs):
+                batch[r, :len(seq)] = torch.tensor(seq, dtype=torch.long, device=self.device)
 
-    def generate_expression(self, num_features, max_depth=3):
-        """生成带多重保护的表达式"""
+            with torch.no_grad():
+                logits = self.model(batch, lens)[torch.arange(len(active)), lens - 1]
+                probs = F.softmax(logits, dim=-1).cpu().numpy()
 
-        def _generate(depth=0):
-            if depth >= max_depth or np.random.rand() < 0.2:
-                return self._generate_safe_leaf(num_features)
+            done = []
+            for r, i in enumerate(active):
+                st = states[i]
+                depth = st["slots"][-1]
+                mask = self._mask_for(depth, len(st["tokens"]), len(st["slots"]))
+                p = np.where(mask, probs[r], 0.0)
+                if p.sum() <= 0:
+                    p = mask.astype(float)
+                p = p / p.sum()
+                choice = int(np.random.choice(len(p), p=p))
+                tok = "c" if choice == self.index.get("c") else \
+                      (self.vocab[choice - 1] if choice > 0 else "c")
 
-            op = np.random.choice(['+', '-', '*', '/', 'log', 'sqrt', 'exp'])
+                st["slots"].pop()
+                if tok in BINARY:
+                    st["slots"] += [depth + 1, depth + 1]
+                    st["tokens"].append(tok)
+                elif tok in UNARY:
+                    st["slots"].append(depth + 1)
+                    st["tokens"].append(tok)
+                elif tok == "c":
+                    value = float(np.random.normal(0.0, const_scale))
+                    st["tokens"].append(("const", value))
+                else:
+                    st["tokens"].append(tok)
 
-            # 增强生成保护规则
-            if op == '/':
-                numerator = f"({_generate(depth + 1)})"
-                denominator = f"safe_div_denom({_generate(depth + 1)})"  # 特殊保护分母
-                return f"safe_div({numerator}, {denominator})"
-            elif op == 'log':
-                arg = f"safe_log_arg({_generate(depth + 1)})"
-                return f"safe_log({arg})"
-            elif op == 'exp':
-                arg = f"safe_exp_arg({_generate(depth + 1)})"
-                return f"safe_exp({arg})"
-            elif op == 'sqrt':
-                arg = f"safe_sqrt_arg({_generate(depth + 1)})"
-                return f"sqrt({arg})"
+                st["seq"].append(choice)
+                if not st["slots"]:
+                    done.append(i)
+            active = [i for i in active if i not in done]
+
+        return [states[i]["tokens"] for i in range(n)]
+
+    # ------------------------------------------------------------ 训练
+    def _train_step(self, sequences):
+        """对精英序列做一次教师强制交叉熵训练"""
+        if not sequences:
+            return 0.0
+        lens = torch.tensor([len(s) - 1 for s in sequences], dtype=torch.long)
+        width = int(max(len(s) - 1 for s in sequences))
+        inputs = torch.zeros((len(sequences), width), dtype=torch.long, device=self.device)
+        targets = torch.full((len(sequences), width), -100, dtype=torch.long, device=self.device)
+        for r, seq in enumerate(sequences):
+            n = len(seq) - 1
+            inputs[r, :n] = torch.tensor(seq[:-1], dtype=torch.long, device=self.device)
+            targets[r, :n] = torch.tensor(seq[1:], dtype=torch.long, device=self.device)
+
+        logits = self.model(inputs, lens)
+        loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]),
+                               targets.reshape(-1), ignore_index=-100)
+        self.opt.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5.0)
+        self.opt.step()
+        return float(loss)
+
+    # ------------------------------------------------------------ 主流程
+    def fit(self, X, y, max_depth=3, loss_threshold=0.01,
+            iterations=10, samples=24, elite=6, early_stop=True, verbose=False):
+        """训练并返回 ``(最优表达式串, 最优 MSE)``"""
+        scale = float(np.std(y)) or 1.0
+        best_tokens, best_loss = None, float("inf")
+        best_seq, stale = None, 0
+
+        for it in range(iterations):
+            const_scale = scale * (0.5 ** it)        # 常数范围逐轮收紧
+            batch = self.sample_batch(samples, max_depth, const_scale)
+            losses = [_mse(toks, X, y) for toks in batch]
+
+            order = np.argsort(losses)
+            if losses[order[0]] < best_loss:
+                best_loss = float(losses[order[0]])
+                best_tokens = batch[int(order[0])]
+                best_seq = [BOS] + self._encode(best_tokens)
+                stale = 0
             else:
-                return f"({_generate(depth + 1)} {op} {_generate(depth + 1)})"
+                stale += 1
 
-        return _generate(0)
+            if best_loss < loss_threshold:           # 已经足够好
+                break
 
-    def evaluate_expression(self, expr, X, y, verbose=False):
-        """增强型安全评估"""
-        try:
-            # 准备带有嵌套保护的评估环境
-            env = {
-                'x' + str(i): np.clip(X[:, i], -1e6, 1e6) for i in range(X.shape[1])  # 限制输入范围
-            }
-            env.update({
-                'safe_div': self.safe_ops['/'],
-                'safe_div_denom': lambda x: x + 1e-6,
-                'safe_log': self.safe_ops['log'],
-                'safe_log_arg': lambda x: np.abs(x) + 1e-6,
-                'safe_exp': self.safe_ops['exp'],
-                'safe_exp_arg': lambda x: np.clip(x, -100, 100),
-                'safe_sqrt_arg': lambda x: np.abs(x),
-                **self.safe_ops
-            })
+            elites = [batch[int(i)] for i in order[:elite] if np.isfinite(losses[int(i)])]
+            seqs = [[BOS] + self._encode(t) for t in elites]
+            if best_tokens is not None:              # 精英保留：历史最优进入训练集
+                seqs.append(best_seq)
+            self._train_step(seqs)
 
-            compiled_expr = compile(expr, '<string>', 'eval')  # 预编译提高安全性
-            y_pred = eval(compiled_expr, env)
-
-            '''# 严格有效性检查
-            if not isinstance(y_pred, np.ndarray):
-                raise ValueError("表达式未生成数组")'''
-
-            valid_mask = np.isfinite(y_pred)
-            if np.sum(valid_mask) < len(y_pred) * 0.95:  # 允许最多5%无效值
-                raise ValueError("无效值超过阈值")
-
-            if np.abs(y_pred).max() > 1e20:  # 防止数值过大
-                raise ValueError("数值溢出")
-            return mean_squared_error(y[valid_mask], y_pred[valid_mask])
-
-        except Exception as e:
+            if early_stop and stale >= 3:            # 连续无改进 → 收敛
+                break
             if verbose:
-                print(f"表达式 '{expr}' 失败原因: {str(e)}")
-            return np.inf
+                print(f"    rnn iter {it + 1}/{iterations}: best_MSE={best_loss:.6g}")
 
-    def find_best_expression(self, lhs_cols, rhs_cols, loss_threshold=0.01):
-        # 提取数据
-        X = self.data[:, lhs_cols]
-        y = self.data[:, rhs_cols]
+        if best_tokens is None:
+            return "1", float("inf")
+        return _to_string(_parse(best_tokens)), best_loss
 
-        # 动态初始化模型
-        num_features = len(lhs_cols)
-        vocab = self._build_vocab(num_features)
-        if self.current_vocab != vocab:
-            self.current_vocab = vocab
-            self.vocab_size = len(vocab)
-            self.model = self._init_model(self.vocab_size).to(self.device)
-
-        # 搜索逻辑
-        best_loss = np.inf
-        for _ in range(100):
-            expr = self.generate_expression(num_features)
-            current_loss = self.evaluate_expression(expr, X, y)
-            if current_loss < best_loss:
-                best_loss = current_loss
-                if best_loss <= loss_threshold:
-                    break
-
-        return {
-            "feasible": best_loss <= loss_threshold,
-            "best_loss": best_loss,
-            "features": lhs_cols,
-            "target": rhs_cols
-        }
+    def _encode(self, tokens):
+        out = []
+        for tok in tokens:
+            if isinstance(tok, tuple):
+                out.append(self.index["c"])
+            else:
+                out.append(self.index[tok])
+        return out
 
 
-class DataProcessor:
-    def __init__(self):
-        # 添加数据标准化
-        raw_data = np.random.rand(100, 4)
-        self.df = pd.DataFrame({
-            'x0': (raw_data[:,0] - 0.5) * 2,   # 范围[-1,1]
-            'x1': (raw_data[:,1] - 0.5) * 2,
-            'y1': np.sin(raw_data[:,2]),
-            'y2': np.cos(raw_data[:,3])
-        })
-        self.regressor = SymbolicRegressorRNN(data=self.df)
+# --------------------------------------------------------------- 对外接口
+def fit_model(data, target_column, input_columns, init_pop=None, loss_threshold=0.01,
+              max_depth=3, reuse_pop=True, early_stop=True,
+              population_size=100, generations=20, mutation_rate=0.1, verbose=False):
+    """与 ``mygenetic.fit_model`` 同签名，供 ``SymRegression`` 直接替换
 
-    def analyze_combinations(self, combinations):
-        results = []
-        for lhs, rhs in combinations:
-            result = self.regressor.find_best_expression(
-                lhs_cols=[self.df.columns.get_loc(c) for c in lhs],
-                rhs_cols=[self.df.columns.get_loc(c) for c in rhs]
-            )
-            results.append(result)
-            print(f"{lhs} -> {rhs}: Loss={result['best_loss']:.4f}")
-        return results
+    返回 ``(state, expression, loss)``；``state`` 是训练好的 ``RNNRegressor``，
+    开启 ``reuse_pop`` 时可在下一个节点继续用（词表不同则自动重建）。
+    """
+    input_columns = list(input_columns)
+    X = np.asarray(data)[:, input_columns]
+    y = np.asarray(data)[:, target_column]
 
+    regressor = init_pop if (reuse_pop and isinstance(init_pop, RNNRegressor)
+                             and init_pop.num_features == len(input_columns)) else None
+    if regressor is None:
+        regressor = RNNRegressor(len(input_columns))
 
-# 使用示例 --------------------------------------------------
-if __name__ == "__main__":
-    processor = DataProcessor()
-
-    test_combinations = [
-        (['x0', 'x1'], ['y1']),
-        (['x0'], ['y2']),
-    ]
-
-    processor.analyze_combinations(test_combinations)
+    iterations = max(3, generations // 2)
+    samples = max(8, population_size // 4)
+    expr, loss = regressor.fit(X, y, max_depth=max_depth, loss_threshold=loss_threshold,
+                               iterations=iterations, samples=samples,
+                               elite=max(3, samples // 4), early_stop=early_stop,
+                               verbose=verbose)
+    return (regressor if reuse_pop else None), expr, loss

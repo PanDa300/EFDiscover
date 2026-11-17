@@ -39,10 +39,11 @@ class SymRegression:
     VARIANT_NAME = "EFDiscover"
     REUSE_POP = True      # 增量发现
     EARLY_STOP = True     # 损失变化率早停
+    BACKEND = "gp"        # "gp" = 遗传编程， "rnn" = LSTM 生成
 
     def __init__(self, file_name, row=-1, col=-1, seed=0, drop_id=False,
                  max_depth=3, population_size=100, generations=20,
-                 mutation_rate=0.1, loss_threshold=0.01):
+                 mutation_rate=0.1, loss_threshold=0.01, backend="gp"):
         self.file_name = file_name
         self.seed = seed
         self.max_depth = max_depth
@@ -50,6 +51,7 @@ class SymRegression:
         self.generations = generations
         self.mutation_rate = mutation_rate
         self.loss_threshold = loss_threshold
+        self.backend = backend
         self.cnt = 0                    # 实际执行的符号回归次数（SR 计数）
         self.cache = {}                 # (RHS, LHS 元组) -> (损失, 表达式)
 
@@ -100,12 +102,17 @@ class SymRegression:
         """跑一次符号回归，并把结果写入缓存
 
         缓存很关键：同一个 (LHS, RHS) 在 EBTree 判定时已经回归过一次，
-        报告表达式时直接用那次的结果，否则两次独立的遗传搜索会给出
+        报告表达式时直接用那次的结果，否则两次独立的搜索会给出
         不一致的损失（曾出现"判定通过、打印出来的损失却大于 φ"的情况）。
         """
-        pop_now, solution, loss = mygenetic.fit_model(
+        if self.backend == "rnn":
+            from SymbolicRNN import fit_model as fit          # 延迟导入：没装 torch 也能用 gp
+        else:
+            fit = mygenetic.fit_model
+
+        pop_now, solution, loss = fit(
             self.data, RHS, LHS,
-            pop if self.REUSE_POP else [],
+            pop if self.REUSE_POP else None,
             loss_threshold=self.loss_threshold,
             max_depth=self.max_depth,
             reuse_pop=self.REUSE_POP,
