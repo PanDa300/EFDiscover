@@ -7,7 +7,7 @@
   nonEFD 都会调用它，``pop`` 是父节点传下来的种群；
 * ``Get_Regression(LHS, RHS, pop) -> expression``：规则输出时取一次最优表达式。
 
-三个变体（对应论文的消融实验，见 ICDE 2024 论文 §6.4.1）：
+三个变体：
 
 ===============  =================================  ==========================
 类               增量发现（种群复用）               损失变化率早停
@@ -50,7 +50,7 @@ class SymRegression:
         self.generations = generations
         self.mutation_rate = mutation_rate
         self.loss_threshold = loss_threshold
-        self.cnt = 0                    # 实际执行的符号回归次数（论文里的 SR 计数）
+        self.cnt = 0                    # 实际执行的符号回归次数（SR 计数）
         self.cache = {}                 # (RHS, LHS 元组) -> (损失, 表达式)
 
         self.df = self._read(file_name, drop_id)

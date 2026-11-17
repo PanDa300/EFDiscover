@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""消融变体 EFDiscover-Sym1（nonSymPop）
+"""变体 EFDiscover-Sym1（nonSymPop）
 
 与完整版唯一的差别：**关闭增量发现**。每次符号回归都用全新随机种群，
 不沿 EBTree 复用上一节点的种群，因此 ``pop`` 参数被忽略。
 
-对应 ``main.py`` 里的 ``EFDiscover1``，实验表格中的 ``EFDiscover_nonSymPop`` 一列。
+对应 ``main.py`` 里的 ``EFDiscover1``，结果表里记作 ``nonSymPop``。
 """
 from SymRegression import SymRegression
 

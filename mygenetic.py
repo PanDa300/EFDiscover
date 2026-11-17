@@ -3,14 +3,14 @@
 
 用表达式树（+、-、*、/、sin、cos 与常数）拟合 ``Y ≈ f(X)``，返回最优表达式与适应度（MSE）。
 
-论文（EFDiscover, ICDE 2024）在符号回归上有两个优化，这里用开关表达：
+符号回归上有两个可选优化，这里用开关表达：
 
 * ``reuse_pop``：**增量发现**。上一个节点（EBTree 兄弟/父子节点）留下的种群作为
   下一轮回归的初始种群的一部分，沿着 EBTree 逐层复用，减少随机重启的浪费。
 * ``early_stop``：**损失变化率早停**。相邻两代最优适应度的变化幅度低于
   ``loss_threshold / 10`` 时认为已收敛，提前结束迭代。
 
-对应的消融开关见 ``SymRegression`` / ``SymRegression1`` / ``SymRegression2``。
+对应的开关见 ``SymRegression`` / ``SymRegression1`` / ``SymRegression2``。
 """
 import copy
 import math
@@ -20,7 +20,7 @@ import random
 import numpy as np
 import pandas as pd
 
-# 论文使用的符号集合 L = {+ - * / sin cos}
+# 符号集合 L = {+ - * / sin cos}
 OPERATORS = {
     '+': operator.add,
     '-': operator.sub,
@@ -144,7 +144,7 @@ def crossover(parent1, parent2):
 def mutate(tree, mutation_rate, num_features, max_depth, depth=0):
     """变异：按概率整棵子树重生，否则递归向下
 
-    ``depth`` 用于保证整棵表达式树不超过 ``max_depth``（论文要求表达式尽量简单）。
+    ``depth`` 用于保证整棵表达式树不超过 ``max_depth``，让输出的表达式尽量简单。
     """
     if depth >= max_depth:
         return Node(random.choice(list(num_features) + [random.uniform(-1, 1)]))

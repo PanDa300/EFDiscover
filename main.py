@@ -1,10 +1,7 @@
 # -*- coding: utf-8 -*-
 """EFDiscover 主程序：Expression Functional Dependency（EFD）挖掘
 
-论文：*EFDiscover: Prior-Free Discovery of Inter-Attribute Expression Functional
-Dependencies in Noisy Data*（ICDE 2024）
-
-整体流程（论文 §3.1–3.3）：
+整体流程：
 
 1. 以每个属性 ``Y`` 为 RHS，按与 ``Y`` 的相关性（``1-|corr|`` 升序）排列其余属性，
    得到候选 LHS 的插入顺序；
@@ -18,8 +15,8 @@ Dependencies in Noisy Data*（ICDE 2024）
 
     python main.py                                              # glass.data 前 60 行、8 个属性
     python main.py --rows 100 --cols -1                         # 全部属性
-    python main.py --variant all                                # 三个变体一起跑（消融对比）
-    python main.py --grid                                       # 论文的规模灵敏度扫描
+    python main.py --variant all                                # 三个变体一起跑
+    python main.py --grid                                       # 按行数/列数扫描
 """
 import argparse
 import os
@@ -120,9 +117,9 @@ def report(name, rules, sr_count, loss, elapsed):
           f"平均损失：{loss:.4g}    耗时：{elapsed:.2f} s")
 
 
-# --------------------------------------------------------------- 论文扫描图
+# --------------------------------------------------------------- 规模扫描
 def grid(filename, phi, variants=("0", "1", "2"), seed=0, **kwargs):
-    """复现论文的规模灵敏度实验：分别扫行数与列数"""
+    """分别扫行数与列数，观察规模对 EFDiscover 的影响"""
     row_list = [100, 200, 300, 500, 700, 1000, 1200, 1500, 1700, 2000]
     col_list = list(range(5, 12))
     rows_n = {k: {"cnt": [], "time": [], "sr": [], "loss": []} for k in variants}
@@ -181,7 +178,7 @@ def main(argv=None):
     ap.add_argument("--gp-loss", type=float, default=None,
                     help="符号回归内部早停阈值（适应度低于它就不再进化）；默认取 --phi/10")
     ap.add_argument("--top", type=int, default=20, help="最多打印多少条规则")
-    ap.add_argument("--grid", action="store_true", help="跑论文的规模灵敏度扫描")
+    ap.add_argument("--grid", action="store_true", help="按行数/列数扫描并写出 csv")
     ap.add_argument("--quiet", action="store_true", help="只打印统计，不打印表达式")
     args = ap.parse_args(argv)
 
