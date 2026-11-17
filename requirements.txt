@@ -1,0 +1,5 @@
+numpy>=1.19
+pandas>=1.0
+
+# 可选：SymbolicRNN.py（论文 §3.3 的 RNN 表达式构造原型）需要
+# torch>=1.10

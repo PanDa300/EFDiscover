@@ -1,128 +1,147 @@
+# -*- coding: utf-8 -*-
+"""符号回归封装：把数据集交给 ``mygenetic``，给出某个属性集合上的最优表达式与损失
 
+约定（与 ``EBTree`` 一致）：
 
-import numpy as np
-import os
+* ``Calc_Regression(LHS, RHS, pop) -> (pop_now, loss)``：EBTree 每次判断节点是否为
+  nonEFD 都会调用它，``pop`` 是父节点传下来的种群；
+* ``Get_Regression(LHS, RHS, pop) -> expression``：规则输出时取一次最优表达式。
+
+三个变体（对应论文的消融实验，见 ICDE 2024 论文 §6.4.1）：
+
+===============  =================================  ==========================
+类               增量发现（种群复用）               损失变化率早停
+===============  =================================  ==========================
+``SymRegression``   开启（``REUSE_POP = True``）       开启（``EARLY_STOP = True``）   完整 EFDiscover
+``SymRegression1``  关闭                                开启                           EFDiscover-Sym1 / nonSymPop
+``SymRegression2``  开启                                关闭                           EFDiscover-Sym2 / nonSymLoss
+===============  =================================  ==========================
+"""
 import pandas as pd
 
-from sklearn.model_selection import train_test_split
-from sklearn import preprocessing
-#from gplearn.genetic import SymbolicTransformer, SymbolicRegressor
 import mygenetic
-import time
-def NRegression(data, input_columns, target_column):
-    # 提取输入矩阵X和目标向量Y
-    X = data[:, input_columns]
-    Y = data[:, target_column]
-    #print(X.shape,Y.shape)
-    # 添加偏置项
-    X = np.hstack([np.ones((X.shape[0], 1)), X])
 
-    # 计算线性回归的参数 (theta)
-    theta = np.linalg.inv(X.T @ X) @ X.T @ Y
 
-    # 计算预测值
-    Y_pred = X @ theta
+def _looks_numeric(cells):
+    try:
+        for v in cells:
+            if v == "":
+                continue
+            float(v)
+        return True
+    except ValueError:
+        return False
 
-    # 计算均方误差 (MSE)
-    mse = np.mean((Y - Y_pred) ** 2)
-
-    # 构建回归方程的表达式
-    equation_terms = [f"{theta[0]:.4f}"] + [f"{theta[i+1]:.4f} * x{i+1}" for i in range(len(input_columns))]
-    equation = " + ".join(equation_terms)
-
-    return equation, mse
 
 class SymRegression:
-    def __init__(self,file_name,row,col):
-        self.df=pd.read_csv(file_name)
-        self.df=self.df.select_dtypes(include=["float64", "int64"])
+    """完整版：增量发现 + 损失变化率早停"""
+
+    VARIANT_NAME = "EFDiscover"
+    REUSE_POP = True      # 增量发现
+    EARLY_STOP = True     # 损失变化率早停
+
+    def __init__(self, file_name, row=-1, col=-1, seed=0, drop_id=False,
+                 max_depth=3, population_size=100, generations=20,
+                 mutation_rate=0.1, loss_threshold=0.01):
+        self.file_name = file_name
+        self.seed = seed
+        self.max_depth = max_depth
+        self.population_size = population_size
+        self.generations = generations
+        self.mutation_rate = mutation_rate
+        self.loss_threshold = loss_threshold
+        self.cnt = 0                    # 实际执行的符号回归次数（论文里的 SR 计数）
+        self.cache = {}                 # (RHS, LHS 元组) -> (损失, 表达式)
+
+        self.df = self._read(file_name, drop_id)
         if row != -1:
             self.df = self.df.head(row)
-        if col != -1:
-            self.df = self.df.sample(n=col, axis='columns')
-        self.cnt=0
+        if col != -1 and col < self.df.shape[1]:
+            self.df = self.df.sample(n=col, axis="columns", random_state=seed)
+        # 抽样后列标签会变得不连续，这里统一改成位置下标 0..d-1，
+        # 原始列名另存到 self.names，供输出使用（EBTree 内部一律用位置下标）
+        self.names = [str(c) for c in self.df.columns]
+        self.df = self.df.reset_index(drop=True)
+        self.df.columns = range(self.df.shape[1])
+        self._data = None
 
-    def Calc_Regression(self,LHS,RHS,pop,loss_threshold=0.1):
-        data=self.df.values
-        # data = sc.fit_transform(data)
-        #self.cnt+=1
-        if LHS==[]:
-            return pop,1
-        '''best_solution, best_fitness=NRegression(data, LHS, RHS)
-        if best_fitness<loss_threshold:
-            return pop,best_fitness'''
-        #print(LHS,RHS,len(data[0]))
-        pop_now,best_solution,best_fitness =mygenetic.fit_model(data, RHS,LHS, pop,loss_threshold, max_depth=3)
-        self.cnt+=1
-        #print(best_solution,best_fitness)
-        return pop_now,best_fitness
+    # ------------------------------------------------------------------ 数据
+    @staticmethod
+    def _read(file_name, drop_id=False):
+        """读 CSV
 
+        * 首行能整体解析为数字时视为**无表头**（如 ``glass.data``），否则按表头读；
+        * 只保留数值列；
+        * ``drop_id=True`` 时去掉无表头数据的第一列（通常是样本编号）；
+        * 无表头数据的列名记为位置下标 ``0..d-1``。
+        """
+        with open(file_name, encoding="utf-8", errors="ignore") as fh:
+            first = fh.readline().strip()
+        has_header = not _looks_numeric(first.split(","))
+        df = pd.read_csv(file_name, header=0 if has_header else None)
+        df = df.select_dtypes(include=["float64", "int64"])
+        if drop_id and not has_header and df.shape[1] > 1:
+            df = df.iloc[:, 1:]
+        if not has_header:
+            df.columns = range(df.shape[1])
+        return df
 
-    def Get_Regression(self,LHS,RHS,pop,loss_threshold=0.1):
-        data=self.df.values
-        # data = sc.fit_transform(data)
-        pop_now,best_solution,best_fitness =mygenetic.fit_model(data, RHS,LHS, pop,loss_threshold, max_depth=3)
-        return best_solution
+    @property
+    def data(self):
+        if self._data is None:
+            self._data = self.df.values
+        return self._data
 
+    def column_names(self):
+        return list(self.names)
 
-if __name__=="__main__":
-    # 示例用法
-    np.random.seed(42)
-    n, m = 100, 5
-    data = np.random.rand(n, m)
+    # ------------------------------------------------------------- 回归调用
+    def _fit(self, LHS, RHS, pop):
+        """跑一次符号回归，并把结果写入缓存
 
-    input_columns = [0, 1, 2, 3]  # 输入属性的列号
-    target_column = 4  # 目标属性的列号
+        缓存很关键：同一个 (LHS, RHS) 在 EBTree 判定时已经回归过一次，
+        报告表达式时直接用那次的结果，否则两次独立的遗传搜索会给出
+        不一致的损失（曾出现"判定通过、打印出来的损失却大于 φ"的情况）。
+        """
+        pop_now, solution, loss = mygenetic.fit_model(
+            self.data, RHS, LHS,
+            pop if self.REUSE_POP else [],
+            loss_threshold=self.loss_threshold,
+            max_depth=self.max_depth,
+            reuse_pop=self.REUSE_POP,
+            early_stop=self.EARLY_STOP,
+            population_size=self.population_size,
+            generations=self.generations,
+            mutation_rate=self.mutation_rate,
+        )
+        self.cnt += 1
+        self.cache[(RHS, tuple(LHS))] = (float(loss), str(solution))
+        return pop_now, float(loss)
 
-    equation, mse = NRegression(data, input_columns, target_column)
-    print(f"Linear regression equation: {equation}")
-    print(f"Mean Squared Error: {mse}")
+    def Calc_Regression(self, LHS, RHS, pop, loss_threshold=None):
+        """EBTree 节点判定：返回 ``(新种群, 最小损失)``；LHS 为空时损失记为 1"""
+        if not LHS:
+            return pop, 1.0
+        if loss_threshold is not None:
+            self.loss_threshold = loss_threshold
+        return self._fit(LHS, RHS, pop)
 
-    '''Score_final=[]
-    import time
-    for i in [500,1000,1500,2000,2500,3000]:
-        Start=time.time()
-        df = df.head(i)
-        data = df.iloc[:, 3:]
-        target = df.iloc[:, 1]
-        print(type(data),type(target))
-        train_x, valid_x, train_y, valid_y = train_test_split(data, target, test_size=0.2, random_state=2023)
-        est_gp = SymbolicRegressor(population_size=5000,
-                                   generations=20, stopping_criteria=0.01,
-                                   p_crossover=0.7, p_subtree_mutation=0.1,
-                                   p_hoist_mutation=0.05, p_point_mutation=0.1,
-                                   max_samples=0.9, verbose=1,
-                                   parsimony_coefficient=0.01, random_state=0)
-        est_gp.fit(train_x, train_y)
-        End=time.time()
-        Score_final.append(End-Start)
-        print( est_gp._program)
-    print(est_gp.score(valid_x, valid_y))  # 0.5967867578111098
-    print(
-        est_gp._program)  # sub(div(X5, 0.022), mul(add(mul(X10, X4), sub(X5, 0.502)), sub(div(X10, X12), add(div(mul(add(X5, X5), mul(X12, X10)), sub(0.479, 0.502)), sub(div(X11, X12), sub(0.479, 0.502))))))
-    print(Score_final)
-    from pydotplus.graphviz import graph_from_dot_data
-    
-    dot_data = est_gp._program.export_graphviz()
-    #dot_data = dot_data.replace('\n', '')
-    graph = graph_from_dot_data(dot_data)  # Create graph from dot data
-    
-    graph.write('D:/决策树.png')  # Write graphto PNG image
-    
-    for i in range(1,len(Score_final)):
-        Score_final[i]=Score_final[i-1]+Score_final[i]*i
-    
-    import matplotlib.pyplot as plt
-    
-    x_axis_data = [500,1000,1500,2000,2500,3000]  # x
-    y_axis_data = Score_final  # y
-    
-    plt.plot(x_axis_data, y_axis_data, linewidth=1, label='time')  # 'bo-'表示蓝色实线，数据点实心原点标注
-    ## plot中参数的含义分别是横轴值，纵轴值，线的形状（'s'方块,'o'实心圆点，'*'五角星   ...，颜色，透明度,线的宽度和标签 ，
-    
-    plt.legend()  # 显示上面的label
-    plt.xlabel('Cnt')  # x_label
-    plt.ylabel('Time')  # y_label
-    
-    # plt.ylim(-1,1)#仅设置y轴坐标范围
-    plt.show()'''
+    def explain(self, LHS, RHS):
+        """返回 ``(表达式, 损失)``：优先用缓存里那次回归的结果"""
+        key = (RHS, tuple(LHS))
+        if key not in self.cache:
+            self._fit(LHS, RHS, [])
+        loss, expr = self.cache[key]
+        return expr, loss
+
+    def Get_Regression(self, LHS, RHS, pop=None):
+        """取该属性集合上的最优表达式（字符串）"""
+        if not LHS:
+            return "1"
+        return self.explain(LHS, RHS)[0]
+
+    def Get_Regression_with_loss(self, LHS, RHS, pop=None):
+        """同时返回表达式与损失，便于报告"""
+        if not LHS:
+            return "1", 1.0
+        return self.explain(LHS, RHS)

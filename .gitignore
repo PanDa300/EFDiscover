@@ -1,0 +1,18 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.ipynb_checkpoints/
+.DS_Store
+
+# 实验产物
+row_sweep.csv
+col_sweep.csv
+row-*.csv
+col-*.csv
+
+# 说明：示例数据 glass.data 体积很小，保留在仓库中，请勿忽略。
