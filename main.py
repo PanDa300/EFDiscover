@@ -170,19 +170,17 @@ def main(argv=None):
     ap.add_argument("--phi", type=float, default=0.02, help="EFD 损失阈值 ε")
     ap.add_argument("--variant", default="0", choices=sorted(VARIANTS) + ["all"],
                     help="0=完整 EFDiscover，1=无增量发现，2=无损失变化率早停，all=三个都跑")
-    ap.add_argument("--backend", default="gp", choices=["gp", "rnn"],
-                    help="符号回归后端：gp=遗传编程，rnn=LSTM 编码器-解码器（需 PyTorch）")
     ap.add_argument("--no-pretrain", action="store_true",
-                    help="rnn 后端：跳过后端在整个数据集上的预训练，直接逐节点训练")
+                    help="跳过符号回归在整份数据上的预训练，直接逐节点训练")
     ap.add_argument("--pretrain-tasks", type=int, default=20,
-                    help="rnn 后端：预训练采样的任务数")
+                    help="预训练采样的任务数")
     ap.add_argument("--drop-id", action="store_true", help="无表头数据去掉第一列（样本编号）")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-depth", type=int, default=3, help="表达式树最大深度")
-    ap.add_argument("--population", type=int, default=100, help="种群大小")
-    ap.add_argument("--generations", type=int, default=20, help="遗传代数")
-    ap.add_argument("--gp-loss", type=float, default=None,
-                    help="符号回归内部早停阈值（适应度低于它就不再进化）；默认取 --phi/10")
+    ap.add_argument("--samples", type=int, default=50, help="每轮采样的表达式个数")
+    ap.add_argument("--iterations", type=int, default=10, help="每个节点的训练轮数")
+    ap.add_argument("--sr-loss", type=float, default=None,
+                    help="符号回归内部早停阈值（MSE 低于它就不再训练）；默认取 --phi/10")
     ap.add_argument("--top", type=int, default=20, help="最多打印多少条规则")
     ap.add_argument("--grid", action="store_true", help="按行数/列数扫描并写出 csv")
     ap.add_argument("--quiet", action="store_true", help="只打印统计，不打印表达式")
@@ -193,14 +191,13 @@ def main(argv=None):
 
     kwargs = dict(drop_id=args.drop_id,
                   max_depth=args.max_depth,
-                  population_size=args.population,
-                  generations=args.generations,
-                  backend=args.backend,
+                  samples=args.samples,
+                  iterations=args.iterations,
                   pretrain=not args.no_pretrain,
                   pretrain_tasks=args.pretrain_tasks,
-                  loss_threshold=args.gp_loss if args.gp_loss is not None else args.phi / 10)
+                  loss_threshold=args.sr_loss if args.sr_loss is not None else args.phi / 10)
 
-    # 固定随机数，保证同一组参数可复现（遗传编程本身是随机的）
+    # 固定随机数，保证同一组参数可复现（符号回归本身是随机的）
     random.seed(args.seed)
     np.random.seed(args.seed)
 

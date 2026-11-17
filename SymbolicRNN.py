@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""RNN 驱动的符号回归（``--backend rnn``）
+"""RNN 驱动的符号回归
 
-与 ``mygenetic``（遗传编程）互为替代：同样输入 ``Y`` 与 LHS 列，输出最优表达式与 MSE。
-这里用**编码器-解码器**式的自回归生成，并在数据集级做一次预训练：
+输入 ``Y`` 与候选 LHS 列，输出最优表达式与 MSE。用**编码器-解码器**式的自回归生成，
+并在数据集级做一次预训练：
 
 1. **编码器**：读入"属性上下文"序列——对数据集里每个属性给出
    ``[是否为候选 LHS, |corr(x_j, y)|, std(x_j)/std(y), (mean(x_j)-mean(y))/std(y)]``，
@@ -22,7 +22,7 @@ import copy
 
 import numpy as np
 
-try:                      # torch 是可选的：没装也不影响 --backend gp
+try:                      # 需要 PyTorch
     import torch
     import torch.nn as nn
     import torch.nn.functional as F
@@ -522,33 +522,3 @@ class RNNSymbolicRegressor:
         if best_tokens is None:
             return "1", float("inf")
         return expression_string(best_tokens), best_loss
-
-
-# --------------------------------------------------------------- 对外接口
-def fit_model(data, target_column, input_columns, init_pop=None, loss_threshold=0.01,
-              max_depth=3, reuse_pop=True, early_stop=True,
-              population_size=100, generations=20, mutation_rate=0.1, verbose=False,
-              engine=None, pretrain=False):
-    """与 ``mygenetic.fit_model`` 同签名
-
-    ``engine`` 传入已预训练的 ``RNNSymbolicRegressor`` 时直接复用（推荐，见 ``SymRegression``）；
-    否则临时建一个，``pretrain=True`` 时先做一遍数据集级预训练。
-    返回 ``(state, expression, loss)``。
-    """
-    input_columns = list(input_columns)
-    if engine is None:
-        engine = RNNSymbolicRegressor(np.asarray(data)[:, :], seed=0)
-        if pretrain:
-            engine.pretrain()
-    expr, loss = engine.fit(
-        input_columns, int(target_column),
-        max_depth=max_depth,
-        iterations=max(3, generations // 2),
-        samples=max(8, population_size // 4),
-        elite=max(3, max(8, population_size // 4) // 4),
-        loss_threshold=loss_threshold,
-        early_stop=early_stop,
-        reuse_pop=reuse_pop,
-        verbose=verbose,
-    )
-    return engine, expr, loss

@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
-"""符号回归封装：把数据集交给 ``mygenetic``，给出某个属性集合上的最优表达式与损失
+"""符号回归封装：把数据集交给 ``SymbolicRNN``，给出某个属性集合上的最优表达式与损失
 
 约定（与 ``EBTree`` 一致）：
 
 * ``Calc_Regression(LHS, RHS, pop) -> (pop_now, loss)``：EBTree 每次判断节点是否为
-  nonEFD 都会调用它，``pop`` 是父节点传下来的种群；
+  nonEFD 都会调用它，``pop`` 是父节点传下来的状态（RNN 后端即已训练的模型）；
 * ``Get_Regression(LHS, RHS, pop) -> expression``：规则输出时取一次最优表达式。
 
 三个变体：
 
 ===============  =================================  ==========================
-类               增量发现（种群复用）               损失变化率早停
+类               增量发现（模型复用）               损失变化率早停
 ===============  =================================  ==========================
 ``SymRegression``   开启（``REUSE_POP = True``）       开启（``EARLY_STOP = True``）   完整 EFDiscover
 ``SymRegression1``  关闭                                开启                           EFDiscover-Sym1 / nonSymPop
@@ -18,8 +18,6 @@
 ===============  =================================  ==========================
 """
 import pandas as pd
-
-import mygenetic
 
 
 def _looks_numeric(cells):
@@ -37,22 +35,18 @@ class SymRegression:
     """完整版：增量发现 + 损失变化率早停"""
 
     VARIANT_NAME = "EFDiscover"
-    REUSE_POP = True      # 增量发现
+    REUSE_POP = True      # 增量发现：沿用上一个节点训练过的模型
     EARLY_STOP = True     # 损失变化率早停
-    BACKEND = "gp"        # "gp" = 遗传编程， "rnn" = LSTM 生成
 
     def __init__(self, file_name, row=-1, col=-1, seed=0, drop_id=False,
-                 max_depth=3, population_size=100, generations=20,
-                 mutation_rate=0.1, loss_threshold=0.01, backend="gp",
-                 pretrain=True, pretrain_tasks=20):
+                 max_depth=3, samples=50, iterations=10,
+                 loss_threshold=0.01, pretrain=True, pretrain_tasks=20):
         self.file_name = file_name
         self.seed = seed
         self.max_depth = max_depth
-        self.population_size = population_size
-        self.generations = generations
-        self.mutation_rate = mutation_rate
+        self.samples = samples            # 每轮采样的表达式个数
+        self.iterations = iterations      # 每个节点的训练轮数
         self.loss_threshold = loss_threshold
-        self.backend = backend
         self.rnn_pretrain = pretrain
         self.rnn_pretrain_tasks = pretrain_tasks
         self._rnn = None                # 惰性创建的 RNN 引擎（数据集级预训练）
@@ -109,36 +103,21 @@ class SymRegression:
         报告表达式时直接用那次的结果，否则两次独立的搜索会给出
         不一致的损失（曾出现"判定通过、打印出来的损失却大于 φ"的情况）。
         """
-        if self.backend == "rnn":
-            samples = max(16, self.population_size // 2)
-            expr, loss = self._rnn_engine().fit(
-                list(LHS), RHS,
-                max_depth=self.max_depth,
-                iterations=max(4, self.generations // 2),
-                samples=samples,
-                elite=max(4, samples // 6),
-                loss_threshold=self.loss_threshold,
-                early_stop=self.EARLY_STOP,
-                reuse_pop=self.REUSE_POP,
-            )
-            pop_now = None
-        else:
-            pop_now, solution, loss = mygenetic.fit_model(
-                self.data, RHS, LHS,
-                pop if self.REUSE_POP else None,
-                loss_threshold=self.loss_threshold,
-                max_depth=self.max_depth,
-                reuse_pop=self.REUSE_POP,
-                early_stop=self.EARLY_STOP,
-                population_size=self.population_size,
-                generations=self.generations,
-                mutation_rate=self.mutation_rate,
-            )
-            expr = str(solution)
+        samples = max(8, self.samples)
+        expr, loss = self._rnn_engine().fit(
+            list(LHS), RHS,
+            max_depth=self.max_depth,
+            iterations=max(3, self.iterations),
+            samples=samples,
+            elite=max(4, samples // 6),
+            loss_threshold=self.loss_threshold,
+            early_stop=self.EARLY_STOP,
+            reuse_pop=self.REUSE_POP,
+        )
 
         self.cnt += 1
         self.cache[(RHS, tuple(LHS))] = (float(loss), expr)
-        return pop_now, float(loss)
+        return None, float(loss)
 
     def _rnn_engine(self):
         """惰性创建 RNN 引擎，并在整个数据集上预训练一次"""
