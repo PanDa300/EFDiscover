@@ -43,7 +43,8 @@ class SymRegression:
 
     def __init__(self, file_name, row=-1, col=-1, seed=0, drop_id=False,
                  max_depth=3, population_size=100, generations=20,
-                 mutation_rate=0.1, loss_threshold=0.01, backend="gp"):
+                 mutation_rate=0.1, loss_threshold=0.01, backend="gp",
+                 pretrain=True, pretrain_tasks=20):
         self.file_name = file_name
         self.seed = seed
         self.max_depth = max_depth
@@ -52,6 +53,9 @@ class SymRegression:
         self.mutation_rate = mutation_rate
         self.loss_threshold = loss_threshold
         self.backend = backend
+        self.rnn_pretrain = pretrain
+        self.rnn_pretrain_tasks = pretrain_tasks
+        self._rnn = None                # 惰性创建的 RNN 引擎（数据集级预训练）
         self.cnt = 0                    # 实际执行的符号回归次数（SR 计数）
         self.cache = {}                 # (RHS, LHS 元组) -> (损失, 表达式)
 
@@ -106,24 +110,45 @@ class SymRegression:
         不一致的损失（曾出现"判定通过、打印出来的损失却大于 φ"的情况）。
         """
         if self.backend == "rnn":
-            from SymbolicRNN import fit_model as fit          # 延迟导入：没装 torch 也能用 gp
+            samples = max(16, self.population_size // 2)
+            expr, loss = self._rnn_engine().fit(
+                list(LHS), RHS,
+                max_depth=self.max_depth,
+                iterations=max(4, self.generations // 2),
+                samples=samples,
+                elite=max(4, samples // 6),
+                loss_threshold=self.loss_threshold,
+                early_stop=self.EARLY_STOP,
+                reuse_pop=self.REUSE_POP,
+            )
+            pop_now = None
         else:
-            fit = mygenetic.fit_model
+            pop_now, solution, loss = mygenetic.fit_model(
+                self.data, RHS, LHS,
+                pop if self.REUSE_POP else None,
+                loss_threshold=self.loss_threshold,
+                max_depth=self.max_depth,
+                reuse_pop=self.REUSE_POP,
+                early_stop=self.EARLY_STOP,
+                population_size=self.population_size,
+                generations=self.generations,
+                mutation_rate=self.mutation_rate,
+            )
+            expr = str(solution)
 
-        pop_now, solution, loss = fit(
-            self.data, RHS, LHS,
-            pop if self.REUSE_POP else None,
-            loss_threshold=self.loss_threshold,
-            max_depth=self.max_depth,
-            reuse_pop=self.REUSE_POP,
-            early_stop=self.EARLY_STOP,
-            population_size=self.population_size,
-            generations=self.generations,
-            mutation_rate=self.mutation_rate,
-        )
         self.cnt += 1
-        self.cache[(RHS, tuple(LHS))] = (float(loss), str(solution))
+        self.cache[(RHS, tuple(LHS))] = (float(loss), expr)
         return pop_now, float(loss)
+
+    def _rnn_engine(self):
+        """惰性创建 RNN 引擎，并在整个数据集上预训练一次"""
+        from SymbolicRNN import RNNSymbolicRegressor
+        if self._rnn is None:
+            self._rnn = RNNSymbolicRegressor(self.data, seed=self.seed,
+                                             max_len=max(8, self.max_depth * 4 + 3))
+            if self.rnn_pretrain:
+                self._rnn.pretrain(tasks=self.rnn_pretrain_tasks, max_depth=self.max_depth)
+        return self._rnn
 
     def Calc_Regression(self, LHS, RHS, pop, loss_threshold=None):
         """EBTree 节点判定：返回 ``(新种群, 最小损失)``；LHS 为空时损失记为 1"""

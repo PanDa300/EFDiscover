@@ -25,8 +25,11 @@ X --(f, ε)--> Y ,   f(X) = Y ,   拟合误差 ≤ ε
 3. **子树剪枝**：判定一个节点后，把"全 EFD / 全 nonEFD"的整棵子树剪掉，不再逐个回归。
 4. **符号回归**：每个待判定的属性集合跑一次符号回归，得到最优表达式与 MSE，
    与 `φ` 比较决定是 EFD 还是 nonEFD。两个后端可选：
-   `--backend gp` 用遗传编程（`mygenetic.py`），`--backend rnn` 用 LSTM 逐符号生成
-   表达式（`SymbolicRNN.py`，需 PyTorch）。
+   * `--backend gp`：遗传编程（`mygenetic.py`）；
+   * `--backend rnn`：编码器-解码器（`SymbolicRNN.py`，需 PyTorch）。编码器把"每个属性与
+     RHS 的关系"编码成解码器初始隐状态，解码器按前缀序列逐步生成表达式；网络先在整份
+     数据集上预训练一次，再对每个节点微调，最后用最小二乘把表达式里的常数重解一遍。
+   * 两个后端生成的表达式都至少包含一个 LHS 属性——纯常数拟合不算"被属性决定"，不判为 EFD。
 5. **两个可选优化**：
    * **增量发现**：把上一节点的种群沿 EBTree 复用，省掉随机重启（RNN 后端是复用已训练的 LSTM）；
    * **损失变化率早停**：相邻两代最优适应度变化小于 `loss_threshold/10` 就认为收敛退出。
@@ -42,7 +45,7 @@ X --(f, ε)--> Y ,   f(X) = Y ,   拟合误差 ≤ ε
 | `SymRegression2.py` | 变体 nonSymLoss：关闭损失变化率早停 |
 | `mygenetic.py` | 遗传编程符号回归（表达式树、选择、交叉、变异、早停），`--backend gp` 使用 |
 | `glass.data` | 示例数据（UCI Glass，214 行，首列为样本编号，无表头） |
-| `SymbolicRNN.py` | RNN 符号回归（LSTM 逐符号生成表达式 + 精英交叉熵训练），`--backend rnn` 使用 |
+| `SymbolicRNN.py` | RNN 符号回归：编码器-解码器自回归生成 + 数据集级预训练 + 常数最小二乘精修，`--backend rnn` 使用 |
 | `convert.py` / `corrsplit.py` / `draw.py` | 辅助脚本：表达式串转符号序列、属性相关性分组、作图 |
 
 ## 环境
@@ -80,7 +83,9 @@ python main.py --phi 0.01 --top 10              # 收紧损失阈值
 | `--cols` | 8 | 随机取多少列属性，`-1` 为全部 |
 | `--phi` | 0.02 | EFD 损失阈值 `ε` |
 | `--variant` | `0` | `0`=完整流程，`1`=不做增量发现，`2`=不做损失变化率早停，`all`=三个都跑 |
-| `--backend` | `gp` | 符号回归后端：`gp`=遗传编程，`rnn`=LSTM 逐符号生成（需 PyTorch） |
+| `--backend` | `gp` | 符号回归后端：`gp`=遗传编程，`rnn`=编码器-解码器自回归生成（需 PyTorch） |
+| `--no-pretrain` | 关闭 | rnn 后端跳过数据集级预训练，直接逐节点训练 |
+| `--pretrain-tasks` | 20 | rnn 后端预训练采样的任务数 |
 | `--drop-id` | 关闭 | 无表头数据去掉第一列 |
 | `--seed` | 0 | 随机种子（列抽样与遗传算法都受它控制） |
 | `--max-depth` | 3 | 表达式树最大深度 |

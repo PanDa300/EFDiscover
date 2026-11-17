@@ -171,7 +171,11 @@ def main(argv=None):
     ap.add_argument("--variant", default="0", choices=sorted(VARIANTS) + ["all"],
                     help="0=完整 EFDiscover，1=无增量发现，2=无损失变化率早停，all=三个都跑")
     ap.add_argument("--backend", default="gp", choices=["gp", "rnn"],
-                    help="符号回归后端：gp=遗传编程，rnn=LSTM 生成（需 PyTorch）")
+                    help="符号回归后端：gp=遗传编程，rnn=LSTM 编码器-解码器（需 PyTorch）")
+    ap.add_argument("--no-pretrain", action="store_true",
+                    help="rnn 后端：跳过后端在整个数据集上的预训练，直接逐节点训练")
+    ap.add_argument("--pretrain-tasks", type=int, default=20,
+                    help="rnn 后端：预训练采样的任务数")
     ap.add_argument("--drop-id", action="store_true", help="无表头数据去掉第一列（样本编号）")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-depth", type=int, default=3, help="表达式树最大深度")
@@ -192,6 +196,8 @@ def main(argv=None):
                   population_size=args.population,
                   generations=args.generations,
                   backend=args.backend,
+                  pretrain=not args.no_pretrain,
+                  pretrain_tasks=args.pretrain_tasks,
                   loss_threshold=args.gp_loss if args.gp_loss is not None else args.phi / 10)
 
     # 固定随机数，保证同一组参数可复现（遗传编程本身是随机的）
