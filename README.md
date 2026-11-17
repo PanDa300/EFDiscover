@@ -47,7 +47,7 @@ X --(f, ε)--> Y ,   f(X) = Y ,   拟合误差 ≤ ε
 | `SymRegression2.py` | 变体 nonSymLoss：关闭损失变化率早停 |
 | `SymbolicRNN.py` | 编码器-解码器符号回归、数据集级预训练、常数最小二乘精修 |
 | `glass.data` | 示例数据（UCI Glass，214 行，首列为样本编号，无表头） |
-| `convert.py` / `corrsplit.py` / `draw.py` | 辅助脚本：表达式串转符号序列、属性相关性分组、作图 |
+| `corrsplit.py` / `draw.py` | 辅助脚本：属性相关性分组、作图 |
 
 ## 环境
 
